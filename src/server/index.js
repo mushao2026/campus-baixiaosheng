@@ -30,13 +30,12 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', name: '校园百晓生 API', version: '1.0.0' });
 });
 
-// 生产环境：托管前端静态文件
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '..', '..', 'dist')));
-  app.get('/{*path}', (req, res) => {
-    res.sendFile(path.join(__dirname, '..', '..', 'dist', 'index.html'));
-  });
-}
+// 托管前端静态文件（始终启用）
+const distPath = path.join(__dirname, '..', '..', 'dist');
+app.use(express.static(distPath));
+app.get('/{*path}', (req, res) => {
+  res.sendFile(path.join(distPath, 'index.html'));
+});
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🎓 校园百晓生 API 服务启动成功！`);
