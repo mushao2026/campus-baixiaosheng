@@ -9,7 +9,7 @@ function generateCode() {
 }
 
 // 发送验证码
-router.post('/send-code', (req, res) => {
+router.post('/send-code', async (req, res) => {
   const { phone } = req.body;
 
   if (!phone || !/^1[3-9]\d{9}$/.test(phone)) {
@@ -20,17 +20,19 @@ router.post('/send-code', (req, res) => {
   const code = generateCode();
 
   // 验证码 5 分钟有效
-  db.prepare("INSERT INTO verify_codes (phone, code, expires_at) VALUES (?, ?, datetime('now', '+5 minutes'))").run(phone, code);
+  await db.query(
+    "INSERT INTO verify_codes (phone, code, expires_at) VALUES ($1, $2, NOW() + INTERVAL '5 minutes')",
+    [phone, code]
+  );
 
   // TODO: 接入阿里云 SMS 发送短信
-  // 开发阶段打印到控制台
   console.log(`[验证码] 手机号: ${phone}, 验证码: ${code}`);
 
-  res.json({ success: true, message: '验证码已发送', devCode: code }); // 生产环境删除 devCode
+  res.json({ success: true, message: '验证码已发送', devCode: code });
 });
 
 // 验证码登录
-router.post('/login', (req, res) => {
+router.post('/login', async (req, res) => {
   const { phone, code } = req.body;
 
   if (!phone || !code) {
@@ -40,22 +42,30 @@ router.post('/login', (req, res) => {
   const db = getDb();
 
   // 验证码校验
-  const record = db.prepare(
-    'SELECT * FROM verify_codes WHERE phone = ? AND code = ? AND expires_at > datetime(\'now\') AND used = 0 ORDER BY id DESC LIMIT 1'
-  ).get(phone, code);
+  const { rows: records } = await db.query(
+    'SELECT * FROM verify_codes WHERE phone = $1 AND code = $2 AND expires_at > NOW() AND used = 0 ORDER BY id DESC LIMIT 1',
+    [phone, code]
+  );
 
-  if (!record) {
+  if (!records.length) {
     return res.json({ success: false, message: '验证码错误或已过期' });
   }
 
+  const record = records[0];
+
   // 标记验证码已使用
-  db.prepare('UPDATE verify_codes SET used = 1 WHERE id = ?').run(record.id);
+  await db.query('UPDATE verify_codes SET used = 1 WHERE id = $1', [record.id]);
 
   // 查找或创建用户
-  let user = db.prepare('SELECT * FROM users WHERE phone = ?').get(phone);
+  let { rows: users } = await db.query('SELECT * FROM users WHERE phone = $1', [phone]);
+  let user = users[0];
+
   if (!user) {
-    const result = db.prepare('INSERT INTO users (phone, credits) VALUES (?, 5)').run(phone);
-    user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);
+    const { rows: inserted } = await db.query(
+      'INSERT INTO users (phone, credits) VALUES ($1, 5) RETURNING *',
+      [phone]
+    );
+    user = inserted[0];
   }
 
   // 生成 JWT

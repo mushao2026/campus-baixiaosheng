@@ -10,7 +10,7 @@ const PACKAGES = [
   { id: 'semester', name: '学期卡', amount: 29.90, credits: 1000, desc: '1000次提问，学霸必备', tag: '最划算' },
 ];
 
-// 管理员密码（从环境变量读取，默认值仅开发用）
+// 管理员密码
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'campus2026';
 
 // 管理员登录中间件
@@ -29,8 +29,8 @@ router.get('/packages', (req, res) => {
   res.json({ success: true, packages: PACKAGES });
 });
 
-// 创建充值订单（生成订单号，等用户扫码付款后提交）
-router.post('/create-order', (req, res) => {
+// 创建充值订单
+router.post('/create-order', async (req, res) => {
   const { packageId } = req.body;
   const userId = req.user.userId;
 
@@ -42,16 +42,12 @@ router.post('/create-order', (req, res) => {
   const db = getDb();
   const orderNo = 'CBX' + Date.now() + crypto.randomBytes(3).toString('hex').toUpperCase();
 
-  const result = db.prepare(
-    'INSERT INTO orders (user_id, amount, credits, package_name, status, pay_method) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(userId, pkg.amount, pkg.credits, pkg.name, 'pending', 'alipay');
-
-  const orderId = result.lastInsertRowid;
-
-  // 把订单号写到 package_name 里方便用户转账备注（或者单独字段）
-  db.prepare('UPDATE orders SET package_name = ? WHERE id = ?').run(
-    `${pkg.name}(${orderNo})`, orderId
+  const { rows } = await db.query(
+    'INSERT INTO orders (user_id, amount, credits, package_name, status, pay_method) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
+    [userId, pkg.amount, pkg.credits, `${pkg.name}(${orderNo})`, 'pending', 'alipay']
   );
+
+  const orderId = rows[0].id;
 
   res.json({
     success: true,
@@ -65,8 +61,8 @@ router.post('/create-order', (req, res) => {
   });
 });
 
-// 用户提交付款信息（扫码付完后，填写付款人姓名）
-router.post('/submit', (req, res) => {
+// 用户提交付款信息
+router.post('/submit', async (req, res) => {
   const { orderId, payerName } = req.body;
   const userId = req.user.userId;
 
@@ -75,17 +71,19 @@ router.post('/submit', (req, res) => {
   }
 
   const db = getDb();
-  const order = db.prepare(
-    'SELECT * FROM orders WHERE id = ? AND user_id = ? AND status = ?'
-  ).get(orderId, userId, 'pending');
+  const { rows: orders } = await db.query(
+    'SELECT * FROM orders WHERE id = $1 AND user_id = $2 AND status = $3',
+    [orderId, userId, 'pending']
+  );
 
-  if (!order) {
+  if (!orders.length) {
     return res.json({ success: false, message: '订单不存在或已处理' });
   }
 
-  db.prepare(
-    'UPDATE orders SET status = ?, payer_name = ? WHERE id = ?'
-  ).run('submitted', payerName.trim(), orderId);
+  await db.query(
+    'UPDATE orders SET status = $1, payer_name = $2 WHERE id = $3',
+    ['submitted', payerName.trim(), orderId]
+  );
 
   console.log(`[支付] 订单 #${orderId} 已提交审核，付款人: ${payerName.trim()}`);
 
@@ -96,11 +94,12 @@ router.post('/submit', (req, res) => {
 });
 
 // 查询我的订单
-router.get('/orders', (req, res) => {
+router.get('/orders', async (req, res) => {
   const db = getDb();
-  const orders = db.prepare(
-    'SELECT id, amount, credits, package_name, status, payer_name, created_at, reviewed_at FROM orders WHERE user_id = ? ORDER BY created_at DESC LIMIT 20'
-  ).all(req.user.userId);
+  const { rows: orders } = await db.query(
+    'SELECT id, amount, credits, package_name, status, payer_name, created_at, reviewed_at FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT 20',
+    [req.user.userId]
+  );
 
   res.json({ success: true, orders });
 });
@@ -108,54 +107,64 @@ router.get('/orders', (req, res) => {
 // ========== 管理员接口 ==========
 
 // 获取待审核订单列表
-router.get('/admin/pending', adminAuth, (req, res) => {
+router.get('/admin/pending', adminAuth, async (req, res) => {
   const db = getDb();
-  const orders = db.prepare(`
+  const { rows: orders } = await db.query(`
     SELECT o.*, u.phone, u.nickname
     FROM orders o
     LEFT JOIN users u ON o.user_id = u.id
     WHERE o.status = 'submitted'
     ORDER BY o.created_at ASC
-  `).all();
+  `);
 
   res.json({ success: true, orders });
 });
 
-// 获取所有订单（管理用）
-router.get('/admin/all', adminAuth, (req, res) => {
+// 获取所有订单
+router.get('/admin/all', adminAuth, async (req, res) => {
   const db = getDb();
   const page = parseInt(req.query.page) || 1;
   const limit = parseInt(req.query.limit) || 50;
   const offset = (page - 1) * limit;
 
-  const orders = db.prepare(`
+  const { rows: orders } = await db.query(`
     SELECT o.*, u.phone, u.nickname
     FROM orders o
     LEFT JOIN users u ON o.user_id = u.id
     ORDER BY o.created_at DESC
-    LIMIT ? OFFSET ?
-  `).all(limit, offset);
+    LIMIT $1 OFFSET $2
+  `, [limit, offset]);
 
-  const total = db.prepare('SELECT COUNT(*) as cnt FROM orders').get().cnt;
+  const { rows: countRows } = await db.query('SELECT COUNT(*)::int as cnt FROM orders');
+  const total = countRows[0].cnt;
 
   res.json({ success: true, orders, total, page, limit });
 });
 
 // 批准订单（充值积分）
-router.post('/admin/approve', adminAuth, (req, res) => {
+router.post('/admin/approve', adminAuth, async (req, res) => {
   const { orderId } = req.body;
   const db = getDb();
 
-  const order = db.prepare('SELECT * FROM orders WHERE id = ? AND status = ?').get(orderId, 'submitted');
-  if (!order) {
+  const { rows: orders } = await db.query(
+    "SELECT * FROM orders WHERE id = $1 AND status = 'submitted'",
+    [orderId]
+  );
+
+  if (!orders.length) {
     return res.json({ success: false, message: '订单不存在或已处理' });
   }
 
-  // 更新订单状态
-  db.prepare('UPDATE orders SET status = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?').run('approved', orderId);
+  const order = orders[0];
 
-  // 充值积分
-  db.prepare('UPDATE users SET credits = credits + ? WHERE id = ?').run(order.credits, order.user_id);
+  await db.query(
+    "UPDATE orders SET status = 'approved', reviewed_at = NOW() WHERE id = $1",
+    [orderId]
+  );
+  await db.query(
+    'UPDATE users SET credits = credits + $1 WHERE id = $2',
+    [order.credits, order.user_id]
+  );
 
   console.log(`[管理] 订单 #${orderId} 已批准，充值 ${order.credits} 积分给用户 ${order.user_id}`);
 
@@ -163,16 +172,23 @@ router.post('/admin/approve', adminAuth, (req, res) => {
 });
 
 // 拒绝订单
-router.post('/admin/reject', adminAuth, (req, res) => {
+router.post('/admin/reject', adminAuth, async (req, res) => {
   const { orderId, reason } = req.body;
   const db = getDb();
 
-  const order = db.prepare('SELECT * FROM orders WHERE id = ? AND status = ?').get(orderId, 'submitted');
-  if (!order) {
+  const { rows: orders } = await db.query(
+    "SELECT * FROM orders WHERE id = $1 AND status = 'submitted'",
+    [orderId]
+  );
+
+  if (!orders.length) {
     return res.json({ success: false, message: '订单不存在或已处理' });
   }
 
-  db.prepare('UPDATE orders SET status = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?').run('rejected', orderId);
+  await db.query(
+    "UPDATE orders SET status = 'rejected', reviewed_at = NOW() WHERE id = $1",
+    [orderId]
+  );
 
   console.log(`[管理] 订单 #${orderId} 已拒绝，原因: ${reason || '未说明'}`);
 
@@ -180,7 +196,7 @@ router.post('/admin/reject', adminAuth, (req, res) => {
 });
 
 // 批量批准
-router.post('/admin/approve-batch', adminAuth, (req, res) => {
+router.post('/admin/approve-batch', adminAuth, async (req, res) => {
   const { orderIds } = req.body;
   const db = getDb();
 
@@ -188,49 +204,64 @@ router.post('/admin/approve-batch', adminAuth, (req, res) => {
     return res.json({ success: false, message: '没有选择订单' });
   }
 
-  const approve = db.prepare('UPDATE orders SET status = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = ?');
-  const addCredits = db.prepare('UPDATE users SET credits = credits + ? WHERE id = ?');
-  const getOrder = db.prepare('SELECT * FROM orders WHERE id = ?');
-
-  const transaction = db.transaction((ids) => {
+  // 用事务处理
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
     let approved = 0;
-    for (const id of ids) {
-      const order = getOrder.get(id);
-      if (order && order.status === 'submitted') {
-        approve.run('approved', id, 'submitted');
-        addCredits.run(order.credits, order.user_id);
+
+    for (const id of orderIds) {
+      const { rows: orders } = await client.query(
+        "SELECT * FROM orders WHERE id = $1 AND status = 'submitted'",
+        [id]
+      );
+      if (orders.length) {
+        const order = orders[0];
+        await client.query(
+          "UPDATE orders SET status = 'approved', reviewed_at = NOW() WHERE id = $1",
+          [id]
+        );
+        await client.query(
+          'UPDATE users SET credits = credits + $1 WHERE id = $2',
+          [order.credits, order.user_id]
+        );
         approved++;
       }
     }
-    return approved;
-  });
 
-  const count = transaction(orderIds);
-  console.log(`[管理] 批量批准 ${count} 个订单`);
-
-  res.json({ success: true, message: `已批准 ${count} 个订单` });
+    await client.query('COMMIT');
+    console.log(`[管理] 批量批准 ${approved} 个订单`);
+    res.json({ success: true, message: `已批准 ${approved} 个订单` });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 });
 
 // 管理后台统计
-router.get('/admin/stats', adminAuth, (req, res) => {
+router.get('/admin/stats', adminAuth, async (req, res) => {
   const db = getDb();
 
-  const totalOrders = db.prepare('SELECT COUNT(*) as cnt FROM orders').get().cnt;
-  const pendingOrders = db.prepare("SELECT COUNT(*) as cnt FROM orders WHERE status = 'submitted'").get().cnt;
-  const approvedOrders = db.prepare("SELECT COUNT(*) as cnt FROM orders WHERE status = 'approved'").get().cnt;
-  const totalRevenue = db.prepare("SELECT COALESCE(SUM(amount), 0) as total FROM orders WHERE status = 'approved'").get().total;
-  const totalUsers = db.prepare('SELECT COUNT(*) as cnt FROM users').get().cnt;
-  const todayChats = db.prepare("SELECT COUNT(*) as cnt FROM chat_logs WHERE created_at >= date('now')").get().cnt;
+  const [totalRes, pendingRes, approvedRes, revenueRes, usersRes, chatsRes] = await Promise.all([
+    db.query('SELECT COUNT(*)::int as cnt FROM orders'),
+    db.query("SELECT COUNT(*)::int as cnt FROM orders WHERE status = 'submitted'"),
+    db.query("SELECT COUNT(*)::int as cnt FROM orders WHERE status = 'approved'"),
+    db.query("SELECT COALESCE(SUM(amount), 0)::float as total FROM orders WHERE status = 'approved'"),
+    db.query('SELECT COUNT(*)::int as cnt FROM users'),
+    db.query("SELECT COUNT(*)::int as cnt FROM chat_logs WHERE created_at >= CURRENT_DATE"),
+  ]);
 
   res.json({
     success: true,
     stats: {
-      totalOrders,
-      pendingOrders,
-      approvedOrders,
-      totalRevenue,
-      totalUsers,
-      todayChats,
+      totalOrders: totalRes.rows[0].cnt,
+      pendingOrders: pendingRes.rows[0].cnt,
+      approvedOrders: approvedRes.rows[0].cnt,
+      totalRevenue: revenueRes.rows[0].total,
+      totalUsers: usersRes.rows[0].cnt,
+      todayChats: chatsRes.rows[0].cnt,
     },
   });
 });

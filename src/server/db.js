@@ -1,63 +1,70 @@
-const Database = require('better-sqlite3');
-const path = require('path');
+const { Pool } = require('pg');
 
-const DB_PATH = path.join(__dirname, '..', '..', 'data.db');
-
-let db;
+let pool;
 
 function getDb() {
-  if (!db) {
-    db = new Database(DB_PATH);
-    db.pragma('journal_mode = WAL');
-    db.pragma('foreign_keys = OFF');  // 支持游客用户 (user_id=-1)
+  if (!pool) {
+    const connectionString = process.env.DATABASE_URL;
+    if (!connectionString) {
+      throw new Error('DATABASE_URL 环境变量未设置！请配置 PostgreSQL 连接字符串。');
+    }
+    pool = new Pool({
+      connectionString,
+      ssl: connectionString.includes('neon.tech') ? { rejectUnauthorized: false } : false,
+    });
     initTables();
   }
-  return db;
+  return pool;
 }
 
-function initTables() {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      phone TEXT UNIQUE,
-      openid TEXT UNIQUE,
-      nickname TEXT DEFAULT '同学',
-      credits INTEGER DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
+async function initTables() {
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        phone TEXT UNIQUE,
+        openid TEXT UNIQUE,
+        nickname TEXT DEFAULT '同学',
+        credits INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
 
-    CREATE TABLE IF NOT EXISTS orders (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      amount REAL NOT NULL,
-      credits INTEGER NOT NULL,
-      package_name TEXT,
-      status TEXT DEFAULT 'pending',
-      pay_method TEXT DEFAULT 'alipay',
-      payer_name TEXT DEFAULT '',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      reviewed_at DATETIME,
-      FOREIGN KEY (user_id) REFERENCES users(id)
-    );
+      CREATE TABLE IF NOT EXISTS orders (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        amount REAL NOT NULL,
+        credits INTEGER NOT NULL,
+        package_name TEXT,
+        status TEXT DEFAULT 'pending',
+        pay_method TEXT DEFAULT 'alipay',
+        payer_name TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        reviewed_at TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+      );
 
-    CREATE TABLE IF NOT EXISTS chat_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER,
-      question TEXT NOT NULL,
-      answer TEXT NOT NULL,
-      tokens_used INTEGER DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users(id)
-    );
+      CREATE TABLE IF NOT EXISTS chat_logs (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER,
+        question TEXT NOT NULL,
+        answer TEXT NOT NULL,
+        tokens_used INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
 
-    CREATE TABLE IF NOT EXISTS verify_codes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      phone TEXT NOT NULL,
-      code TEXT NOT NULL,
-      expires_at DATETIME NOT NULL,
-      used INTEGER DEFAULT 0
-    );
-  `);
+      CREATE TABLE IF NOT EXISTS verify_codes (
+        id SERIAL PRIMARY KEY,
+        phone TEXT NOT NULL,
+        code TEXT NOT NULL,
+        expires_at TIMESTAMP NOT NULL,
+        used INTEGER DEFAULT 0
+      );
+    `);
+    console.log('[DB] PostgreSQL 表初始化完成');
+  } finally {
+    client.release();
+  }
 }
 
 module.exports = { getDb };

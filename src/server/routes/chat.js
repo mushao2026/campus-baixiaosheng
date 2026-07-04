@@ -19,10 +19,11 @@ router.post('/', optionalAuth, async (req, res) => {
     const ip = req.ip || req.connection.remoteAddress;
     const today = new Date().toISOString().slice(0, 10);
 
-    // 给未登录用户自动创建一个临时账号（基于 IP）
-    const freeCount = db.prepare(
-      "SELECT COUNT(*) as cnt FROM chat_logs WHERE user_id = -1 AND created_at >= ?"
-    ).get(today);
+    const { rows: freeRows } = await db.query(
+      "SELECT COUNT(*)::int as cnt FROM chat_logs WHERE user_id = -1 AND created_at >= $1",
+      [today]
+    );
+    const freeCount = freeRows[0];
 
     // 每天免费 10 次
     if (freeCount.cnt >= 10) {
@@ -35,8 +36,9 @@ router.post('/', optionalAuth, async (req, res) => {
 
     try {
       const result = await aiChat(message, history);
-      db.prepare('INSERT INTO chat_logs (user_id, question, answer, tokens_used) VALUES (?, ?, ?, ?)').run(
-        -1, message, result.content, result.tokensUsed
+      await db.query(
+        'INSERT INTO chat_logs (user_id, question, answer, tokens_used) VALUES ($1, $2, $3, $4)',
+        [-1, message, result.content, result.tokensUsed]
       );
 
       return res.json({
@@ -54,7 +56,8 @@ router.post('/', optionalAuth, async (req, res) => {
 
   // 已登录用户：检查积分
   const userId = req.user.userId;
-  const user = db.prepare('SELECT credits FROM users WHERE id = ?').get(userId);
+  const { rows: userRows } = await db.query('SELECT credits FROM users WHERE id = $1', [userId]);
+  const user = userRows[0];
 
   if (!user || user.credits <= 0) {
     return res.json({
@@ -67,12 +70,14 @@ router.post('/', optionalAuth, async (req, res) => {
 
   try {
     const result = await aiChat(message, history);
-    db.prepare('UPDATE users SET credits = credits - 1 WHERE id = ? AND credits > 0').run(userId);
-    db.prepare('INSERT INTO chat_logs (user_id, question, answer, tokens_used) VALUES (?, ?, ?, ?)').run(
-      userId, message, result.content, result.tokensUsed
+    await db.query('UPDATE users SET credits = credits - 1 WHERE id = $1 AND credits > 0', [userId]);
+    await db.query(
+      'INSERT INTO chat_logs (user_id, question, answer, tokens_used) VALUES ($1, $2, $3, $4)',
+      [userId, message, result.content, result.tokensUsed]
     );
 
-    const updatedUser = db.prepare('SELECT credits FROM users WHERE id = ?').get(userId);
+    const { rows: updatedRows } = await db.query('SELECT credits FROM users WHERE id = $1', [userId]);
+    const updatedUser = updatedRows[0];
 
     res.json({
       success: true,
@@ -87,13 +92,14 @@ router.post('/', optionalAuth, async (req, res) => {
 });
 
 // 获取对话历史
-router.get('/history', authMiddleware, (req, res) => {
+router.get('/history', authMiddleware, async (req, res) => {
   const db = getDb();
   const userId = req.user.userId;
 
-  const logs = db.prepare(
-    'SELECT question, answer, created_at FROM chat_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT 50'
-  ).all(userId);
+  const { rows: logs } = await db.query(
+    'SELECT question, answer, created_at FROM chat_logs WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50',
+    [userId]
+  );
 
   res.json({ success: true, history: logs.reverse() });
 });
