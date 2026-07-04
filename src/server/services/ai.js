@@ -1,6 +1,6 @@
 const axios = require('axios');
 
-const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || 'sk-your-deepseek-api-key-here';
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || 'sk-f97f32be62364c36bd249d8620d5aa57';
 const DEEPSEEK_BASE_URL = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
 
 const fs = require('fs');

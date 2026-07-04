@@ -4,10 +4,7 @@ let pool;
 
 function getDb() {
   if (!pool) {
-    const connectionString = process.env.DATABASE_URL;
-    if (!connectionString) {
-      throw new Error('DATABASE_URL 环境变量未设置！请配置 PostgreSQL 连接字符串。');
-    }
+    const connectionString = process.env.DATABASE_URL || 'postgresql://neondb_owner:npg_P9R8IaqEHuYm@ep-small-cherry-atbvmevy.c-9.us-east-1.aws.neon.tech/neondb?sslmode=require';
     pool = new Pool({
       connectionString,
       ssl: connectionString.includes('neon.tech') ? { rejectUnauthorized: false } : false,
